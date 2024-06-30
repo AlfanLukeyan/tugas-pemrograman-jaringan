@@ -1,108 +1,88 @@
-import socket
-import time
-import sys
-import asyncore
+import asyncio
 import logging
-
 
 class BackendList:
     def __init__(self):
-        self.servers = []
-        self.servers.append(('127.0.0.1', 9002))
-        self.servers.append(('127.0.0.1', 9003))
-        self.servers.append(('127.0.0.1', 9004))
-        self.servers.append(('127.0.0.1', 9005))
+        self.servers = [
+            ('127.0.0.1', 9000),
+            ('127.0.0.1', 9001),
+            ('127.0.0.1', 9002)
+        ]
         self.current = 0
 
     def getserver(self):
         s = self.servers[self.current]
-        self.current = self.current + 1
-        if self.current >= len(self.servers):
-            self.current = 0
+        self.current = (self.current + 1) % len(self.servers)
         return s
 
+class ProxyHandler:
+    def __init__(self, client_reader, client_writer, backend_address):
+        self.client_reader = client_reader
+        self.client_writer = client_writer
+        self.backend_address = backend_address
+        self.backend_reader = None
+        self.backend_writer = None
 
-class Backend(asyncore.dispatcher_with_send):
-    def __init__(self, targetaddress):
-        asyncore.dispatcher_with_send.__init__(self)
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.connect(targetaddress)
-        self.client_socket = None
-
-    def handle_read(self):
-        if self.client_socket:
-            try:
-                data = self.recv(8192)
-                if data:
-                    self.client_socket.send(data)
-            except Exception as e:
-                logging.warning("Backend handle_read error: {}".format(e))
-                self.close()
-
-    def handle_close(self):
+    async def handle_client(self):
         try:
-            self.close()
-            if self.client_socket:
-                self.client_socket.close()
+            self.backend_reader, self.backend_writer = await asyncio.open_connection(
+                *self.backend_address
+            )
+
+            client_to_backend = asyncio.create_task(self.transfer_data(self.client_reader, self.backend_writer))
+            backend_to_client = asyncio.create_task(self.transfer_data(self.backend_reader, self.client_writer))
+
+            await asyncio.gather(client_to_backend, backend_to_client)
         except Exception as e:
-            logging.warning("Backend handle_close error: {}".format(e))
+            logging.error(f'Error in handling client: {e}')
+        finally:
+            self.client_writer.close()
+            await self.client_writer.wait_closed()
+            if self.backend_writer:
+                self.backend_writer.close()
+                await self.backend_writer.wait_closed()
 
-
-class ProcessTheClient(asyncore.dispatcher):
-    def __init__(self, sock, backend):
-        asyncore.dispatcher.__init__(self, sock)
-        self.backend = backend
-        self.backend.client_socket = self
-
-    def handle_read(self):
+    async def transfer_data(self, reader, writer):
         try:
-            data = self.recv(8192)
-            if data:
-                self.backend.send(data)
+            while True:
+                data = await reader.read(1024)
+                if not data:
+                    break
+                writer.write(data)
+                await writer.drain()
         except Exception as e:
-            logging.warning("ProcessTheClient handle_read error: {}".format(e))
-            self.close()
+            logging.error(f'Error in transferring data: {e}')
+        finally:
+            writer.close()
+            await writer.wait_closed()
 
-    def handle_close(self):
-        self.close()
-        if self.backend:
-            self.backend.close()
-
-
-class Server(asyncore.dispatcher):
+class Server:
     def __init__(self, portnumber):
-        asyncore.dispatcher.__init__(self)
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.set_reuse_addr()
-        self.bind(('', portnumber))
-        self.listen(5)
-        self.bservers = BackendList()
-        logging.warning("load balancer running on port {}".format(portnumber))
+        self.portnumber = portnumber
+        self.backend_list = BackendList()
 
-    def handle_accept(self):
-        pair = self.accept()
-        if pair is not None:
-            sock, addr = pair
-            logging.warning("connection from {}".format(repr(addr)))
+    async def start(self):
+        server = await asyncio.start_server(self.handle_client, '0.0.0.0', self.portnumber)
+        logging.warning(f'Load balancer running on port {self.portnumber}')
 
-            # menentukan ke server mana request akan diteruskan
-            bs = self.bservers.getserver()
-            logging.warning("koneksi dari {} diteruskan ke {}".format(addr, bs))
-            backend = Backend(bs)
+        async with server:
+            await server.serve_forever()
 
-            # mendapatkan handler dan socket dari client
-            handler = ProcessTheClient(sock, backend)
-
+    async def handle_client(self, reader, writer):
+        backend_address = self.backend_list.getserver()
+        logging.warning(f'Connection from {writer.get_extra_info("peername")} forwarded to {backend_address}')
+        handler = ProxyHandler(reader, writer, backend_address)
+        await handler.handle_client()
 
 def main():
-    portnumber = 55555
-    try:
-        portnumber = int(sys.argv[1])
-    except:
-        pass
-    svr = Server(portnumber)
-    asyncore.loop()
+    portnumber = 44444
+    
+    # Konfigurasi logging untuk menyimpan ke file
+    logging.basicConfig(level=logging.WARNING, filename='lb_async.log', filemode='a',
+                        format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
+    server = Server(portnumber)
+    asyncio.run(server.start())
 
 if __name__ == "__main__":
     main()

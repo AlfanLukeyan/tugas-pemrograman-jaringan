@@ -5,7 +5,7 @@ import sys
 import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
-from http import HttpServer
+from process_server import HttpServer
 
 httpserver = HttpServer()
 
@@ -73,7 +73,8 @@ def main():
 	except:
 		pass
 	svr = Server(portnumber)
+	logging.warning(f"HTTP Server running on port {portnumber}")
 
 if __name__=="__main__":
 	main()
-
+	

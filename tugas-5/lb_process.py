@@ -1,98 +1,70 @@
 from socket import *
-import socket
-import time
-import sys
 import logging
 import multiprocessing
-from concurrent.futures import ProcessPoolExecutor
-from http import HttpServer
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+
+# Konfigurasi logging untuk menyimpan output ke file
+logging.basicConfig(filename='lb_process.log', level=logging.WARNING,
+                    format='%(asctime)s %(levelname)s: %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
 class BackendList:
-	def __init__(self):
-		self.servers=[]
-		self.servers.append(('127.0.0.1',8011))
-		self.servers.append(('127.0.0.1',8012))
-		self.servers.append(('127.0.0.1',8013))
-		self.servers.append(('127.0.0.1',8014))
-		self.current=0
-	def getserver(self):
-		s = self.servers[self.current]
-		print(s)
-		self.current=self.current+1
-		if (self.current>=len(self.servers)):
-			self.current=0
-		return s
+    def __init__(self):
+        self.servers = [
+            ('127.0.0.1', 9000),
+            # ('127.0.0.1', 9001),
+            # ('127.0.0.1', 9002)
+        ]
+        self.current = 0
 
+    def getserver(self):
+        s = self.servers[self.current]
+        self.current = (self.current + 1) % len(self.servers)
+        return s
 
+def forward_data(source, destination):
+    try:
+        while True:
+            data = source.recv(4096)
+            if data:
+                destination.sendall(data)
+            else:
+                break
+    except Exception as e:
+        logging.warning(f"Error in forwarding data: {str(e)}")
+    finally:
+        source.close()
+        destination.close()
 
-
-def ProcessTheClient(connection,address,backend_sock,mode='toupstream'):
-		try:
-			while True:
-				try:
-					if (mode=='toupstream'):
-						datafrom_client = connection.recv(32)
-						if datafrom_client:
-								backend_sock.sendall(datafrom_client)
-						else:
-								backend_sock.close()
-								break
-					elif (mode=='toclient'):
-						datafrom_backend = backend_sock.recv(32)
-
-						if datafrom_backend:
-								connection.sendall(datafrom_backend)
-						else:
-								connection.close()
-								break
-
-				except OSError as e:
-					pass
-		except Exception as ee:
-			logging.warning(f"error {str(ee)}")
-		connection.close()
-		return
-
-
+def handle_client(client_socket, backend_address):
+    backend_socket = socket(AF_INET, SOCK_STREAM)
+    try:
+        backend_socket.connect(backend_address)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            executor.submit(forward_data, client_socket, backend_socket)
+            executor.submit(forward_data, backend_socket, client_socket)
+    except Exception as e:
+        logging.warning(f"Error in handling client: {str(e)}")
+        client_socket.close()
+        backend_socket.close()
 
 def Server():
-	the_clients = []
-	my_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-	my_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-	backend = BackendList()
+    my_socket = socket(AF_INET, SOCK_STREAM)
+    my_socket.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+    backend = BackendList()
 
-	my_socket.bind(('0.0.0.0', 44444))
-	my_socket.listen(1)
+    my_socket.bind(('0.0.0.0', 44444))
+    my_socket.listen(5)
+    logging.warning("Load balancer running on port 44444")
 
-	with ProcessPoolExecutor(20) as executor:
-		while True:
-				connection, client_address = my_socket.accept()
-				backend_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-				backend_sock.settimeout(1)
-				backend_address = backend.getserver()
-				logging.warning(f"{client_address} connecting to {backend_address}")
-				try:
-					backend_sock.connect(backend_address)
-
-					#logging.warning("connection from {}".format(client_address))
-					toupstream = executor.submit(ProcessTheClient, connection, client_address,backend_sock,'toupstream')
-					#the_clients.append(toupstream)
-					toclient = executor.submit(ProcessTheClient, connection, client_address,backend_sock,'toclient')
-					#the_clients.append(toclient)
-
-					#menampilkan jumlah process yang sedang aktif
-					jumlah = ['x' for i in the_clients if i.running()==True]
-					#print(jumlah)
-				except Exception as err:
-					logging.error(err)
-					pass
-
-
-
-
+    with ThreadPoolExecutor(max_workers=400) as executor:
+        while True:
+            connection, client_address = my_socket.accept()
+            backend_address = backend.getserver()
+            logging.warning(f"{client_address} connecting to {backend_address}")
+            executor.submit(handle_client, connection, backend_address)
 
 def main():
-	Server()
+    Server()
 
-if __name__=="__main__":
-	main()
+if __name__ == "__main__":
+    main()
